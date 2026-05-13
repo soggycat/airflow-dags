@@ -1,8 +1,8 @@
 """
-Airflow v2 DAG: SMB Share → OpenShift NooBaa S3 Bucket
+Airflow v3 DAG: SMB Share → OpenShift NooBaa S3 Bucket
 
 Dependencies:
-    pip install apache-airflow>=2.0.0 pysmb boto3
+    pip install apache-airflow>=3.0.0 pysmb boto3
 
 Airflow Connections required:
     - smb_default (type: generic / custom)
@@ -27,8 +27,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import os
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -40,7 +38,6 @@ from airflow import DAG
 from airflow.hooks.base import BaseHook
 from airflow.models import Variable
 from airflow.operators.python import PythonOperator
-from airflow.utils.dates import days_ago
 
 log = logging.getLogger(__name__)
 
@@ -230,8 +227,8 @@ with DAG(
     dag_id="smb_to_noobaa",
     description="Collect files from an SMB share and upload them to an OpenShift NooBaa S3 bucket.",
     default_args=DEFAULT_ARGS,
-    schedule_interval="@daily",       # adjust as needed
-    start_date=days_ago(1),
+    schedule="@daily",                          # ← was schedule_interval (removed in v3)
+    start_date=datetime(2024, 1, 1),            # ← was days_ago(1) (removed in v3)
     catchup=False,
     max_active_runs=1,
     tags=["smb", "noobaa", "openshift", "s3"],
