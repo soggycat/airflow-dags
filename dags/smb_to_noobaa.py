@@ -16,10 +16,6 @@ Airflow Variables required (or replace with your preferred secrets backend):
     - NOOBAA_ACCESS_KEY : NooBaa / OBC access key
     - NOOBAA_SECRET_KEY : NooBaa / OBC secret key
     - NOOBAA_BUCKET     : target bucket name
-
-Environment note:
-    NooBaa exposes an S3-compatible endpoint; this DAG uses boto3 with
-    path-style addressing, which is required by most self-hosted S3 stores.
 """
 
 from __future__ import annotations
@@ -35,9 +31,11 @@ from botocore.client import Config
 from smb.SMBConnection import SMBConnection
 
 from airflow import DAG
-from airflow.hooks.base import BaseHook
 from airflow.models import Variable
-from airflow.operators.python import PythonOperator
+
+# Airflow 3.x imports
+from airflow.sdk.bases.hook import BaseHook
+from airflow.providers.standard.operators.python import PythonOperator
 
 log = logging.getLogger(__name__)
 
@@ -58,19 +56,6 @@ DEFAULT_ARGS = {
 # ---------------------------------------------------------------------------
 
 def _get_smb_connection(conn_id: str = "smb_default") -> tuple[SMBConnection, dict]:
-    """
-    Returns (SMBConnection, extra_dict).
-
-    The Airflow connection 'smb_default' must have:
-        host     → SMB server hostname / IP
-        login    → username (e.g. DOMAIN\\user  or just user)
-        password → password
-        extra    → JSON with keys:
-                     share_name  (required)
-                     remote_path (optional, default "/")
-                     client_name (optional, default "airflow-client")
-                     domain      (optional, default "")
-    """
     conn = BaseHook.get_connection(conn_id)
     extra = json.loads(conn.extra or "{}")
 
@@ -90,10 +75,10 @@ def _get_smb_connection(conn_id: str = "smb_default") -> tuple[SMBConnection, di
         remote_name=conn.host,
         domain=domain,
         use_ntlm_v2=True,
-        is_direct_tcp=True,   # port 445; set False for port 139
+        is_direct_tcp=True,
     )
 
-    connected = smb_conn.connect(conn.host, 445)
+    connected = smb_conn.connect(conn.host, 445, timeout=10)
     if not connected:
         raise ConnectionError(
             f"Could not connect to SMB server '{conn.host}' using connection '{conn_id}'."
@@ -119,19 +104,19 @@ def _get_noobaa_client() -> tuple[object, str]:
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
         config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
-        verify=False,  # set to True / path-to-CA-bundle in production
+        verify=False,  # set to CA bundle path in production
     )
     return client, bucket
 
 
 # ---------------------------------------------------------------------------
-# Task 1: List files on the SMB share and push paths to XCom
+# Task 1: List files on the SMB share — return value auto-pushed as XCom
 # ---------------------------------------------------------------------------
 
 def list_smb_files(smb_conn_id: str, **context) -> list[str]:
     """
-    Lists all files under remote_path on the SMB share and pushes the
-    list to XCom so downstream tasks can iterate over it.
+    Lists all files under remote_path on the SMB share.
+    The returned list is automatically pushed to XCom as 'return_value'.
     """
     smb_conn, extra = _get_smb_connection(smb_conn_id)
     share_name = extra["share_name"]
@@ -151,8 +136,7 @@ def list_smb_files(smb_conn_id: str, **context) -> list[str]:
     for f in files:
         log.info("  • %s", f)
 
-    # Push to XCom for the next task
-    context["ti"].xcom_push(key="smb_files", value=files)
+    # Return value is automatically stored as XCom 'return_value' in Airflow 3.x
     return files
 
 
@@ -162,11 +146,12 @@ def list_smb_files(smb_conn_id: str, **context) -> list[str]:
 
 def transfer_files_to_noobaa(smb_conn_id: str, s3_prefix: str, **context) -> None:
     """
-    Pulls the file list from XCom, downloads each file from the SMB share
-    into a temporary buffer, and streams it to the NooBaa S3 bucket.
+    Pulls the file list from XCom return_value, downloads each file from
+    the SMB share into a temporary buffer, and streams it to NooBaa S3.
     """
     ti = context["ti"]
-    files: list[str] = ti.xcom_pull(task_ids="list_smb_files", key="smb_files")
+    # Pull from return_value (set automatically by Airflow 3.x from the return of list_smb_files)
+    files: list[str] = ti.xcom_pull(task_ids="list_smb_files")
 
     if not files:
         log.warning("No files to transfer. Skipping.")
@@ -189,7 +174,6 @@ def transfer_files_to_noobaa(smb_conn_id: str, s3_prefix: str, **context) -> Non
             try:
                 smb_conn.retrieveFile(share_name, remote_file_path, buffer)
                 buffer.seek(0)
-
                 s3_client.upload_fileobj(buffer, bucket, s3_key)
                 transferred += 1
                 log.info("  ✓ Uploaded %s (%d bytes)", s3_key, buffer.tell())
@@ -220,15 +204,15 @@ def transfer_files_to_noobaa(smb_conn_id: str, s3_prefix: str, **context) -> Non
 # DAG definition
 # ---------------------------------------------------------------------------
 
-SMB_CONN_ID = "smb_default"          # Airflow connection ID for the SMB share
-S3_PREFIX = "smb-imports"            # Folder prefix inside the NooBaa bucket
+SMB_CONN_ID = "smb_default"
+S3_PREFIX = "smb-imports"
 
 with DAG(
     dag_id="smb_to_noobaa",
     description="Collect files from an SMB share and upload them to an OpenShift NooBaa S3 bucket.",
     default_args=DEFAULT_ARGS,
-    schedule="@daily",                          # ← was schedule_interval (removed in v3)
-    start_date=datetime(2024, 1, 1),            # ← was days_ago(1) (removed in v3)
+    schedule="@daily",
+    start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,
     tags=["smb", "noobaa", "openshift", "s3"],
