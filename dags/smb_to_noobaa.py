@@ -31,7 +31,7 @@ from botocore.client import Config
 from smb.SMBConnection import SMBConnection
 
 from airflow import DAG
-from airflow.models import Variable
+from airflow.sdk import Variable
 
 # Airflow 3.x imports
 from airflow.sdk.bases.hook import BaseHook
@@ -170,19 +170,19 @@ def transfer_files_to_noobaa(smb_conn_id: str, s3_prefix: str, **context) -> Non
 
             log.info("Transferring '%s' → s3://%s/%s", remote_file_path, bucket, s3_key)
 
-            buffer = io.BytesIO()
             try:
+                buffer = io.BytesIO()
                 smb_conn.retrieveFile(share_name, remote_file_path, buffer)
                 buffer.seek(0)
+                file_size = buffer.getbuffer().nbytes
                 s3_client.upload_fileobj(buffer, bucket, s3_key)
+                buffer.close()
                 transferred += 1
-                log.info("  ✓ Uploaded %s (%d bytes)", s3_key, buffer.tell())
+                log.info("  ✓ Uploaded %s (%d bytes)", s3_key, file_size)
 
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 log.error("  ✗ Failed to transfer '%s': %s", remote_file_path, exc)
-            finally:
-                buffer.close()
 
     finally:
         smb_conn.close()
