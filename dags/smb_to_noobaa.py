@@ -205,7 +205,7 @@ def transfer_files_to_noobaa(smb_conn_id: str, s3_prefix: str, **context) -> Non
 # ---------------------------------------------------------------------------
 
 SMB_CONN_ID = "smb_default"
-S3_PREFIX = "smb-imports"
+S3_PREFIX = "folder/landing"
 
 with DAG(
     dag_id="smb_to_noobaa",
